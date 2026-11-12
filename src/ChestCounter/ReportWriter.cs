@@ -420,6 +420,45 @@ public static class ReportWriter
         return sb.ToString();
     }
 
+    /// <summary>
+    /// Lobby-wide estimate over the matches that have a <see cref="LobbyCoverage"/>: finds by the player and the team are
+    /// counted as they are (always seen), finds by others are divided by the share of the others' time that was seen.
+    /// </summary>
+    private sealed record LobbyEstimate(int Matches, double Coverage, int OwnTeam, int OthersSeen, double Total, double PerMatch, double PerMatchLow, double PerMatchHigh)
+    {
+        public static LobbyEstimate? From(List<MatchRecord> matches)
+        {
+            var basis = matches.Where(m => m.LobbyCoverage is { AliveSeconds: > 0 }).ToList();
+            var alive = basis.Sum(m => (double)m.LobbyCoverage!.AliveSeconds);
+            var observed = basis.Sum(m => (double)m.LobbyCoverage!.ObservedSeconds);
+            if (basis.Count == 0 || observed <= 0)
+            {
+                return null;
+            }
+            var finds = basis.SelectMany(m => m.LobbyTreasureFinds).ToList();
+            var own = finds.Count(f => f.Role is LobbyRole.Self or LobbyRole.Team);
+            var others = finds.Count - own;
+            var scale = alive / observed;
+            var (low, high) = Poisson95(others);
+            return new LobbyEstimate(basis.Count, observed / alive, own, others,
+                own + others * scale, (own + others * scale) / basis.Count,
+                (own + low * scale) / basis.Count, (own + high * scale) / basis.Count);
+        }
+
+        /// <summary>Estimated lobby count for one prize: own/team finds as they are, others scaled up.</summary>
+        public double Scale(int ownTeam, int others) => ownTeam + others / Coverage;
+
+        /// <summary>95 % interval of a Poisson count (Wilson–Hilferty); [0, 3.7] for 0.</summary>
+        private static (double Low, double High) Poisson95(int k)
+        {
+            const double z = 1.96;
+            var low = k == 0 ? 0 : k * Math.Pow(1 - 1.0 / (9 * k) - z / (3 * Math.Sqrt(k)), 3);
+            var k1 = k + 1;
+            var high = k1 * Math.Pow(1 - 1.0 / (9 * k1) + z / (3 * Math.Sqrt(k1)), 3);
+            return (Math.Max(0, low), high);
+        }
+    }
+
     private static string RoleLabel(string role) => role switch
     {
         LobbyRole.Self => L.T("toi", "you", "tú"),
@@ -463,6 +502,25 @@ public static class ReportWriter
         sb.Append(Tile(perMatch.ToString("0.00", Fr), L.T("trouvailles par partie", "finds per match", "hallazgos por partida")));
         sb.Append("</section>");
 
+        // Estimate for the whole lobby: own and team finds are always seen; the others' finds are scaled up by the share
+        // of the other players' time the replay saw (pooled over the matches, Poisson 95 % range on the seen count).
+        var est = LobbyEstimate.From(covered);
+        if (est != null)
+        {
+            var range = $"{est.PerMatchLow.ToString("0.00", Fr)} – {est.PerMatchHigh.ToString("0.00", Fr)}";
+            sb.Append("<section class=\"tiles four\" style=\"margin-top:12px\">");
+            sb.Append($"""<div class="tile hero"><div class="k">{L.T("Estimation · toute la partie", "Estimate · whole lobby", "Estimación · toda la partida")}</div><div class="v num">≈ {est.PerMatch.ToString("0.00", Fr)}</div><div class="l">{L.T($"trouvailles par partie (95 % : {range})", $"finds per match (95 %: {range})", $"hallazgos por partida (95 %: {range})")}</div></div>""");
+            sb.Append(Tile($"{(est.Coverage * 100).ToString("0.0", Fr)} %", L.T("de la partie des autres joueurs vue par ton replay", "of the other players' match seen by your replay", "de la partida de los demás jugadores vista por tu repetición"),
+                L.T($"{L.Count(est.Matches, "partie", "parties", "", "", "", "")} · {est.OthersSeen} trouvailles d'autres vues", $"{L.Count(est.Matches, "", "", "match", "matches", "", "")} · {est.OthersSeen} finds by others seen", $"{L.Count(est.Matches, "", "", "", "", "partida", "partidas")} · {est.OthersSeen} hallazgos de otros vistos")));
+            sb.Append(Tile($"≈ {est.Total.ToString("N0", Fr)}", L.T("trouvailles estimées au total", "estimated finds in total", "hallazgos estimados en total"),
+                L.T($"dans ces {est.Matches.ToString("N0", Fr)} parties", $"in these {est.Matches.ToString("N0", Fr)} matches", $"en estas {est.Matches.ToString("N0", Fr)} partidas")));
+            sb.Append("</section>");
+            sb.Append($"<p class=\"note\" style=\"margin-top:10px\">{L.T(
+                "Estimation : on suppose les trouvailles réparties de la même façon sur tous les joueurs et tout le match. La partie vue = temps pendant lequel les autres joueurs (hors équipe, sans les bots) étaient assez proches pour être dans ton replay, de la phase de loot à leur élimination. Avec peu de trouvailles vues, la fourchette est large.",
+                "Estimate: finds are assumed to be spread evenly over all players and the whole match. Share seen = time during which the other players (outside your team, bots left out) were close enough to be in your replay, from the loot phase until their elimination. With few finds seen, the range is wide.",
+                "Estimación: se supone que los hallazgos se reparten por igual entre todos los jugadores y toda la partida. Parte vista = tiempo durante el cual los demás jugadores (fuera de tu equipo, sin bots) estaban lo bastante cerca para estar en tu repetición, desde la fase de botín hasta su eliminación. Con pocos hallazgos vistos, el margen es amplio.")}</p>");
+        }
+
         if (total == 0)
         {
             sb.Append($"<div class=\"card\" style=\"margin-top:20px\"><table><tr><td class=\"items\">{L.T("Aucune trouvaille dans tes replays pour l'instant.", "No finds in your replays yet.", "Todavía ningún hallazgo en tus repeticiones.")}</td></tr></table></div></section>");
@@ -470,14 +528,15 @@ public static class ReportWriter
         }
 
         // By prize: how often, and by whom.
-        sb.Append($"<div class=\"card\" style=\"margin-top:20px\"><table><tr><th>{L.T("Récompense", "Prize", "Premio")}</th><th style=\"text-align:right\">{L.T("Total", "Total", "Total")}</th><th style=\"text-align:right\">{L.T("Toi", "You", "Tú")}</th><th style=\"text-align:right\">{L.T("Équipe", "Team", "Equipo")}</th><th style=\"text-align:right\">{L.T("Adversaires", "Enemies", "Rivales")}</th><th style=\"text-align:right\">{L.T("Inconnu", "Unknown", "Desconocido")}</th></tr>");
+        sb.Append($"<div class=\"card\" style=\"margin-top:20px\"><table><tr><th>{L.T("Récompense", "Prize", "Premio")}</th><th style=\"text-align:right\">{L.T("Total", "Total", "Total")}</th><th style=\"text-align:right\">{L.T("Toi", "You", "Tú")}</th><th style=\"text-align:right\">{L.T("Équipe", "Team", "Equipo")}</th><th style=\"text-align:right\">{L.T("Adversaires", "Enemies", "Rivales")}</th><th style=\"text-align:right\">{L.T("Inconnu", "Unknown", "Desconocido")}</th>{(est != null ? $"<th style=\"text-align:right\">{L.T("≈ Partie entière", "≈ Whole lobby", "≈ Partida entera")}</th>" : "")}</tr>");
         foreach (var g in rows.GroupBy(r => r.f.PrizeId, StringComparer.OrdinalIgnoreCase).OrderByDescending(g => g.Count()).ThenBy(g => g.Key, StringComparer.OrdinalIgnoreCase))
         {
             var id = g.First().f.PrizeId;
             var rare = TreasureNames.IsRare(id);
             int C(string role) => g.Count(r => r.f.Role == role);
             sb.Append($"<tr{(rare ? " class=\"rare\"" : "")}><td>{(rare ? "<span class=\"gold\">◆</span> " : "")}<b>{H(TreasureNames.Friendly(id))}</b><div class=\"raw\">{H(id)}</div></td>"
-                + $"<td class=\"n num big\">{g.Count()}</td><td class=\"n num\">{C(LobbyRole.Self)}</td><td class=\"n num\">{C(LobbyRole.Team)}</td><td class=\"n num\">{C(LobbyRole.Enemy)}</td><td class=\"n num\">{C(LobbyRole.Unknown)}</td></tr>");
+                + $"<td class=\"n num big\">{g.Count()}</td><td class=\"n num\">{C(LobbyRole.Self)}</td><td class=\"n num\">{C(LobbyRole.Team)}</td><td class=\"n num\">{C(LobbyRole.Enemy)}</td><td class=\"n num\">{C(LobbyRole.Unknown)}</td>"
+                + (est != null ? $"<td class=\"n num\">≈ {est.Scale(C(LobbyRole.Self) + C(LobbyRole.Team), C(LobbyRole.Enemy) + C(LobbyRole.Unknown)).ToString("0.#", Fr)}</td>" : "") + "</tr>");
         }
         sb.Append("</table></div>");
 

@@ -119,6 +119,8 @@ The game only sends prize ids, not names: the names of the known prizes are buil
 
 The report also lists **every treasure found by anyone** the replay recorded: you, your team and enemies (golden chest prize ids, plus Pirate Shop / Delilah shop items if they ever show up in a replay). Tiles, a table by prize and a chronological list show who found what and when. Your own counts are not affected. Only players near you are in the replay, so the real numbers of the lobby are higher.
 
+**Whole-lobby estimate.** The lobby size and the kill feed are sent for the whole lobby, so the tool knows how long every other player (outside your team, bots left out) was alive from the loot phase on, and how long of that they were close enough to be in your replay (typically only 5-15 %). Your own and your team's finds are counted as they are; the others' finds are scaled up by that share, pooled over all matches, with a 95 % range. Even with no find seen it gives an upper bound. It assumes finds are spread evenly over players and time.
+
 - Every prize id is kept raw. An id without a name is written once to `unknown_prizes.log` (match date, time in match, finder, replay file).
 - Name ids yourself in `prize_names.json` (case-insensitive, overrides the built-in names; picked up without a restart). `"rare": true` highlights an entry in the report:
 

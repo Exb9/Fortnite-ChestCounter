@@ -116,8 +116,12 @@ public sealed class ReplayAnalyzer : FortniteReplayReader.ReplayReader
     private readonly List<GrantEvent> _grants = new();
 
     /// <summary>Bump when the analysis changes so that existing replays are re-analyzed.</summary>
-    /// <remarks>16: lobby-wide treasure finds (<see cref="MatchRecord.LobbyTreasureFinds"/>).</remarks>
-    public const int CurrentVersion = 16;
+    /// <remarks>16: lobby-wide treasure finds (<see cref="MatchRecord.LobbyTreasureFinds"/>). 17: <see cref="MatchRecord.LobbyCoverage"/>.</remarks>
+    public const int CurrentVersion = 17;
+
+    // Coverage of the lobby: how long each pawn was relevant to the recording player (open channel = in view range).
+    private readonly Dictionary<uint, (uint Pawn, float Open)> _pawnChannels = new();
+    private readonly List<(uint Pawn, float From, float To)> _pawnSeen = new();
 
     // Pirate Shop / Delilah shop items (Pirate Shop Token): never seen in a replay so far, watched as a second source.
     private static readonly Regex ShopItem = new(@"PirateShop|DelilahShop", RegexOptions.Compiled | RegexOptions.IgnoreCase);
@@ -390,10 +394,23 @@ public sealed class ReplayAnalyzer : FortniteReplayReader.ReplayReader
         }
         _channelLabel[channelIndex] = label;
         _channelOpenAt[channelIndex] = Now;
+        if (_pawnChannels.Remove(channelIndex, out var stalePawn))
+        {
+            _pawnSeen.Add((stalePawn.Pawn, stalePawn.Open, Now)); // reused without a close: end the previous view there
+        }
         _channelSearched.Remove(channelIndex);
         _lastSearcher.Remove(channelIndex);
         _equipChannelsSeen.Remove(channelIndex);
         _prizeChannelsSeen.Remove(channelIndex);
+    }
+
+    protected override void OnChannelClosed(uint channelIndex, NetworkGUID? actor)
+    {
+        base.OnChannelClosed(channelIndex, actor);
+        if (_pawnChannels.Remove(channelIndex, out var seen))
+        {
+            _pawnSeen.Add((seen.Pawn, seen.Open, Now));
+        }
     }
 
     /// <summary>Extracts "DelilahPrize:dpid_item4" from the raw property bits (FString inside a struct).</summary>
@@ -518,8 +535,13 @@ public sealed class ReplayAnalyzer : FortniteReplayReader.ReplayReader
                 if (pawnId != null)
                 {
                     _pawnToPlayerState[pawnId.Value] = ps;
+                    if (!_pawnChannels.ContainsKey(channelIndex))
+                    {
+                        _pawnChannels[channelIndex] = (pawnId.Value, _channelOpenAt.GetValueOrDefault(channelIndex, Now));
+                    }
                 }
                 break;
+
 
             case FortPlayerState state:
                 var psId = Channels[channelIndex]?.ActorId;
@@ -920,6 +942,7 @@ public sealed class ReplayAnalyzer : FortniteReplayReader.ReplayReader
             lobby.Add(new LobbyFind { TimeSeconds = MathF.Round(t.Time, 1), PrizeId = t.Item, DisplayName = TreasureNames.Friendly(t.Item), Role = LobbyRole.Unknown, SourceKind = "inconnu", Detection = "item" });
         }
         lobby.Sort((a, b) => a.TimeSeconds.CompareTo(b.TimeSeconds));
+        var coverage = ComputeCoverage(replay, players, target);
 
         teamFinds.Sort((a, b) => (a.ObtainedAtSeconds ?? float.MaxValue).CompareTo(b.ObtainedAtSeconds ?? float.MaxValue));
         finds.Sort((a, b) => (a.ObtainedAtSeconds ?? float.MaxValue).CompareTo(b.ObtainedAtSeconds ?? float.MaxValue));
@@ -956,7 +979,103 @@ public sealed class ReplayAnalyzer : FortniteReplayReader.ReplayReader
             TreasureFinds = finds,
             TeamTreasureFinds = teamFinds,
             LobbyTreasureFinds = lobby,
+            LobbyCoverage = coverage,
         };
+    }
+
+    /// <summary>
+    /// Share of the other players' time (outside the team, humans only) during which the recording player had them in
+    /// view, from the first chest searched by anyone (loot phase) until their elimination or the end of the replay.
+    /// The lobby size comes from the team stats and the eliminations from the kill feed, both sent for the whole lobby:
+    /// players never seen still count (the replay only holds the players that came near). Bots are left out (they get no
+    /// treasure hunt prizes). Null when the tracked player or the loot phase is unknown.
+    /// </summary>
+    private LobbyCoverage? ComputeCoverage(FortniteReplay replay, List<PlayerData> players, PlayerData? target)
+    {
+        if (target?.TeamIndex is not int myTeam || _searches.Count == 0)
+        {
+            return null;
+        }
+        var end = replay.Info?.LengthInMs is uint ms && ms > 0 ? ms / 1000f : Now;
+        foreach (var open in _pawnChannels.Values)
+        {
+            _pawnSeen.Add((open.Pawn, open.Open, end)); // still in view when the recording stopped
+        }
+        _pawnChannels.Clear();
+        var start = _searches.Min(s => s.Time);
+        static string Norm(string? id) => (id ?? "").Replace("-", "").Trim().ToLowerInvariant();
+        static string KeyOf(PlayerData p) => Norm(p.EpicId) is { Length: > 0 } k ? k : $"pid:{p.Id}";
+
+        // Final eliminations (not knocks) from the kill feed: id -> replay time of the last one (after a reboot).
+        var eliminatedAt = new Dictionary<string, float>();
+        var bots = new HashSet<string>();
+        foreach (var e in replay.Eliminations.Where(e => !e.Knocked))
+        {
+            var id = Norm(e.Eliminated);
+            if (id.Length == 0)
+            {
+                continue;
+            }
+            if (e.EliminatedInfo?.IsBot == true)
+            {
+                bots.Add(id);
+                continue;
+            }
+            var at = (e.Info?.StartTime ?? 0) / 1000f;
+            eliminatedAt[id] = Math.Max(eliminatedAt.GetValueOrDefault(id), at);
+        }
+
+        var teamKeys = players.Where(p => p.TeamIndex == myTeam).Select(KeyOf).ToHashSet();
+        var others = new Dictionary<string, PlayerData?>();
+        foreach (var p in players.Where(p => !p.IsBot && p.TeamIndex is int t && t != myTeam))
+        {
+            others[KeyOf(p)] = p;
+        }
+        foreach (var id in eliminatedAt.Keys.Where(id => !teamKeys.Contains(id)))
+        {
+            others.TryAdd(id, null);
+        }
+        var lobby = (int?)replay.TeamStats?.TotalPlayers ?? 0;
+        var neverSeen = Math.Max(0, lobby - teamKeys.Count - bots.Count - others.Count);
+
+        var result = new LobbyCoverage { OtherPlayers = others.Count + neverSeen };
+        foreach (var (key, p) in others)
+        {
+            var until = eliminatedAt.TryGetValue(key, out var gone) ? Math.Clamp(gone, start, end) : end;
+            result.AliveSeconds += until - start;
+            if (p == null)
+            {
+                continue; // eliminated somewhere else, never in view
+            }
+            var states = _playerStateToPlayerId.Where(kv => kv.Value == p.Id).Select(kv => kv.Key).ToHashSet();
+            var pawns = _pawnToPlayerState.Where(kv => states.Contains(kv.Value)).Select(kv => kv.Key).ToHashSet();
+            var views = _pawnSeen.Where(s => pawns.Contains(s.Pawn)).OrderBy(s => s.From).ToList();
+            if (views.Count > 0)
+            {
+                result.OtherPlayersSeen++;
+            }
+            // Union of the view intervals, clipped to [start, until].
+            var cursor = start;
+            foreach (var (_, from, to) in views)
+            {
+                var a = Math.Max(from, cursor);
+                var b = Math.Min(to, until);
+                if (b > a)
+                {
+                    result.ObservedSeconds += b - a;
+                    cursor = b;
+                }
+            }
+        }
+        // Never seen and not in the kill feed: still alive when the recording stopped.
+        result.AliveSeconds += neverSeen * Math.Max(0, end - start);
+        result.AliveSeconds = MathF.Round(result.AliveSeconds);
+        result.ObservedSeconds = MathF.Round(result.ObservedSeconds);
+        if (Debug == "1")
+        {
+            Console.Error.WriteLine($"DBG coverage start={start:F0}s end={end:F0}s lobby={lobby} team={teamKeys.Count} bots={bots.Count} elims={eliminatedAt.Count} others={result.OtherPlayers} (known {others.Count}, never seen {neverSeen}) seen={result.OtherPlayersSeen} observed={result.ObservedSeconds:F0}s alive={result.AliveSeconds:F0}s fraction={result.Fraction:P1}");
+        }
+        return result;
     }
 }
 

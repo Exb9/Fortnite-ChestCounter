@@ -81,6 +81,25 @@ public sealed class MatchRecord
     /// Empty for matches analyzed before analyzer version 16.
     /// </summary>
     public List<LobbyFind> LobbyTreasureFinds { get; set; } = new();
+    /// <summary>How much of the other players' match the replay saw (basis of the lobby estimate). Null before version 17.</summary>
+    public LobbyCoverage? LobbyCoverage { get; set; }
+}
+
+/// <summary>
+/// Time-weighted view of the human players outside the tracked player's team (seen or not), from the loot phase (first chest searched)
+/// until each one's elimination or the end of the replay. "Observed" = their pawn was relevant to the recording player.
+/// </summary>
+public sealed class LobbyCoverage
+{
+    /// <summary>Human players outside the team.</summary>
+    public int OtherPlayers { get; set; }
+    /// <summary>Of those, seen at least once.</summary>
+    public int OtherPlayersSeen { get; set; }
+    /// <summary>Player-seconds alive (sum over the other players).</summary>
+    public float AliveSeconds { get; set; }
+    /// <summary>Player-seconds in view (sum over the other players).</summary>
+    public float ObservedSeconds { get; set; }
+    public float Fraction => AliveSeconds > 0 ? Math.Clamp(ObservedSeconds / AliveSeconds, 0f, 1f) : 0f;
 }
 
 /// <summary>Who found a lobby treasure, relative to the tracked player.</summary>
