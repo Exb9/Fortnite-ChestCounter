@@ -90,7 +90,8 @@ public sealed class Config
     public bool StartWithFortnite { get; set; }
 
     /// <summary>"prompt" (offer new versions), "auto" (install them) or "off" (never check GitHub).</summary>
-    public string UpdateMode { get; set; } = "prompt";
+    /// <remarks>Off by default in this fork: updates must never replace it with the upstream build.</remarks>
+    public string UpdateMode { get; set; } = "off";
     public bool OpenReportOnStart { get; set; } = true;
     public bool ShowOverlay { get; set; } = true;
 

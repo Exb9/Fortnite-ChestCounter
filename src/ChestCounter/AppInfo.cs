@@ -7,7 +7,8 @@ public static class AppInfo
 
     public static string VersionText => $"{Version.Major}.{Version.Minor}.{Math.Max(0, Version.Build)}";
 
-    public const string Repo = "LED-N/Fortnite-ChestCounter";
+    /// <summary>This fork: the updater must only ever fetch releases from here, never from upstream (LED-N).</summary>
+    public const string Repo = "exb9/Fortnite-ChestCounter";
     public static string RepoUrl => "https://github.com/" + Repo;
     public static string IssuesUrl => RepoUrl + "/issues";
 
