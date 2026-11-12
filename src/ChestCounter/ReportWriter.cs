@@ -94,6 +94,7 @@ public static class ReportWriter
     {
         try
         {
+            TreasureNames.RefreshCustom(); // prize_names.json edited while the tool runs: picked up at the next refresh
             var view = Profiles.View(data, config);
             WriteAtomic(store.ReportPath, Report(config, view, Profiles.List(data)));
             WriteAtomic(store.OverlayPath, Overlay(OverlayModel.Build(view, null, false)));
@@ -194,6 +195,13 @@ public static class ReportWriter
         .pbar{height:8px;background:var(--line);border-radius:4px;overflow:hidden;margin:8px 0 6px}
         .pbar i{display:block;height:100%;background:#b9821c}
         .profiles{margin-top:-16px;font-size:13px}
+        .tiles.four{grid-template-columns:repeat(4,minmax(0,1fr))}
+        @media (max-width:820px){.tiles.four{grid-template-columns:repeat(2,minmax(0,1fr))}}
+        .note{font-size:13px;color:var(--muted);margin:-4px 0 12px}
+        .raw{font:11px Consolas,"Cascadia Mono",monospace;color:var(--cmuted);word-break:break-all}
+        tr.rare td{background:rgba(201,162,79,.24)}
+        tr.rare b{color:#8a5200}
+        .role-enemy{color:var(--warn)}.role-team{color:var(--team)}.role-self{color:#b9821c;font-weight:600}
         """;
 
     /// <summary>@font-face of the embedded headings font (empty if the resource is missing: the page falls back to Segoe UI).</summary>
@@ -390,6 +398,8 @@ public static class ReportWriter
             sb.Append("</table></div></section>");
         }
 
+        sb.Append(LobbySection(matches));
+
         // Latest matches.
         sb.Append($"<section><h2 class=\"pirate\">{L.T("Dernières parties", "Latest matches", "Últimas partidas")}</h2><div class=\"card\"><table><tr><th>{L.T("Date", "Date", "Fecha")}</th><th>{L.T("Mode", "Mode", "Modo")}</th><th>{L.T("Place", "Placement", "Puesto")}</th><th style=\"text-align:right\">{L.T("Coffres", "Chests", "Cofres")}</th><th>{L.T("Trésor", "Treasure", "Tesoro")}</th></tr>");
         foreach (var m in matches.Take(100))
@@ -407,6 +417,82 @@ public static class ReportWriter
             "<footer>Counts the chests you opened or destroyed yourself, from your replays, analyzed after each match. Ammo boxes and food boxes are not counted. ★★ = golden treasure hunt chest, detected for sure. ★ = treasure received from one of your own chests (exact moment), named when the item can be identified. The team icon marks a treasure found by a teammate (estimate: deduced from the treasures you receive without opening a chest, as the treasure hunt shares them with the whole team); it is not in your totals.</footer>",
             "<footer>Cuenta los cofres que has abierto o destruido tú mismo, a partir de tus repeticiones, analizadas después de cada partida. Las cajas de munición y de comida no se cuentan. ★★ = cofre dorado de la búsqueda del tesoro, detectado con seguridad. ★ = tesoro recibido de uno de tus cofres (momento exacto), con nombre cuando el objeto se puede identificar. El icono de equipo marca un tesoro encontrado por un compañero (estimación: deducido de los tesoros que recibes sin abrir un cofre, ya que la búsqueda del tesoro los comparte con todo el equipo); no cuenta en tus totales.</footer>"));
         sb.Append(script).Append("</main></body></html>");
+        return sb.ToString();
+    }
+
+    private static string RoleLabel(string role) => role switch
+    {
+        LobbyRole.Self => L.T("toi", "you", "tú"),
+        LobbyRole.Team => L.T("coéquipier", "teammate", "compañero"),
+        LobbyRole.Enemy => L.T("adversaire", "enemy", "rival"),
+        _ => L.T("inconnu", "unknown", "desconocido"),
+    };
+
+    /// <summary>
+    /// Treasures found by anyone in the player's matches (golden chest prizes, shop items), from
+    /// <see cref="MatchRecord.LobbyTreasureFinds"/>. Separate from the player's own figures, which it never changes.
+    /// </summary>
+    private static string LobbySection(List<MatchRecord> matches)
+    {
+        var covered = matches.Where(m => m.AnalyzerVersion >= 16).ToList();
+        var rows = covered.SelectMany(m => m.LobbyTreasureFinds.Select(f => (m, f))).ToList();
+        var total = rows.Count;
+        var enemy = rows.Count(r => r.f.Role == LobbyRole.Enemy);
+        var withFind = covered.Count(m => m.LobbyTreasureFinds.Count > 0);
+        var perMatch = covered.Count > 0 ? (double)total / covered.Count : 0;
+        string Tile(string value, string label, string? sub = null) =>
+            $"""<div class="tile"><div class="v num">{value}</div><div class="l">{label}</div>{(sub != null ? $"<div class=\"s\">{sub}</div>" : "")}</div>""";
+
+        var sb = new StringBuilder();
+        sb.Append($"<section><h2 class=\"pirate\">{L.T("Trouvailles dans tes parties", "Finds in your lobbies", "Hallazgos en tus partidas")}</h2>");
+        sb.Append($"<p class=\"note\">{L.T(
+            "Seuls les joueurs proches de toi sont dans le replay : les vrais chiffres de la partie sont plus élevés.",
+            "Only players near you are in the replay: the real numbers of the lobby are higher.",
+            "Solo los jugadores cerca de ti están en la repetición: las cifras reales de la partida son más altas.")}"
+            + (covered.Count < matches.Count
+                ? " " + L.T($"Basé sur {L.Count(covered.Count, "partie", "parties", "", "", "", "")} (les plus anciennes, dont le replay n'existe plus, n'ont pas ces données).",
+                    $"Based on {L.Count(covered.Count, "", "", "match", "matches", "", "")} (older ones whose replay is gone have no such data).",
+                    $"Basado en {L.Count(covered.Count, "", "", "", "", "partida", "partidas")} (las más antiguas, cuya repetición ya no existe, no tienen estos datos).")
+                : "")
+            + "</p>");
+        sb.Append("<section class=\"tiles four\">");
+        sb.Append(Tile(total.ToString("N0", Fr), L.T("trouvailles (tous les joueurs)", "finds (all players)", "hallazgos (todos los jugadores)")));
+        sb.Append(Tile(enemy.ToString("N0", Fr), L.T("dont par des adversaires", "of which by enemies", "de ellos, por rivales")));
+        sb.Append(Tile(withFind.ToString("N0", Fr), L.T("parties avec au moins une trouvaille", "matches with at least one find", "partidas con al menos un hallazgo"),
+            L.T($"sur {covered.Count.ToString("N0", Fr)}", $"out of {covered.Count.ToString("N0", Fr)}", $"de {covered.Count.ToString("N0", Fr)}")));
+        sb.Append(Tile(perMatch.ToString("0.00", Fr), L.T("trouvailles par partie", "finds per match", "hallazgos por partida")));
+        sb.Append("</section>");
+
+        if (total == 0)
+        {
+            sb.Append($"<div class=\"card\" style=\"margin-top:20px\"><table><tr><td class=\"items\">{L.T("Aucune trouvaille dans tes replays pour l'instant.", "No finds in your replays yet.", "Todavía ningún hallazgo en tus repeticiones.")}</td></tr></table></div></section>");
+            return sb.ToString();
+        }
+
+        // By prize: how often, and by whom.
+        sb.Append($"<div class=\"card\" style=\"margin-top:20px\"><table><tr><th>{L.T("Récompense", "Prize", "Premio")}</th><th style=\"text-align:right\">{L.T("Total", "Total", "Total")}</th><th style=\"text-align:right\">{L.T("Toi", "You", "Tú")}</th><th style=\"text-align:right\">{L.T("Équipe", "Team", "Equipo")}</th><th style=\"text-align:right\">{L.T("Adversaires", "Enemies", "Rivales")}</th><th style=\"text-align:right\">{L.T("Inconnu", "Unknown", "Desconocido")}</th></tr>");
+        foreach (var g in rows.GroupBy(r => r.f.PrizeId, StringComparer.OrdinalIgnoreCase).OrderByDescending(g => g.Count()).ThenBy(g => g.Key, StringComparer.OrdinalIgnoreCase))
+        {
+            var id = g.First().f.PrizeId;
+            var rare = TreasureNames.IsRare(id);
+            int C(string role) => g.Count(r => r.f.Role == role);
+            sb.Append($"<tr{(rare ? " class=\"rare\"" : "")}><td>{(rare ? "<span class=\"gold\">◆</span> " : "")}<b>{H(TreasureNames.Friendly(id))}</b><div class=\"raw\">{H(id)}</div></td>"
+                + $"<td class=\"n num big\">{g.Count()}</td><td class=\"n num\">{C(LobbyRole.Self)}</td><td class=\"n num\">{C(LobbyRole.Team)}</td><td class=\"n num\">{C(LobbyRole.Enemy)}</td><td class=\"n num\">{C(LobbyRole.Unknown)}</td></tr>");
+        }
+        sb.Append("</table></div>");
+
+        // Chronological list, newest match first.
+        sb.Append($"<div class=\"card\" style=\"margin-top:20px\"><table><tr><th>{L.T("Partie", "Match", "Partida")}</th><th>{L.T("Mode", "Mode", "Modo")}</th><th>{L.T("Moment", "Time", "Momento")}</th><th>{L.T("Joueur", "Player", "Jugador")}</th><th>{L.T("Rôle", "Role", "Rol")}</th><th>{L.T("Récompense", "Prize", "Premio")}</th></tr>");
+        foreach (var (m, f) in rows.OrderByDescending(r => When(r.m)).ThenBy(r => r.f.TimeSeconds).Take(500))
+        {
+            var rare = TreasureNames.IsRare(f.PrizeId);
+            var player = f.PlayerName.Length > 0 ? H(f.PlayerName) : $"<span class=\"items\">{L.T("inconnu", "unknown", "desconocido")}</span>";
+            var roleClass = f.Role switch { LobbyRole.Self => "role-self", LobbyRole.Team => "role-team", LobbyRole.Enemy => "role-enemy", _ => "items" };
+            var item = f.Detection == "item" ? $" <span class=\"items\">({L.T("objet vu", "item seen", "objeto visto")})</span>" : "";
+            sb.Append($"<tr{(rare ? " class=\"rare\"" : "")}><td class=\"nw num items\">{L.DateTimeShort(When(m))}</td><td>{H(Pretty.Playlist(m.Playlist))}</td><td class=\"nw num\">{Pretty.Clock(f.TimeSeconds)}</td>"
+                + $"<td>{player}</td><td class=\"{roleClass}\">{RoleLabel(f.Role)}</td><td>{(rare ? "<span class=\"gold\">◆</span> " : "")}<b>{H(TreasureNames.Friendly(f.PrizeId))}</b>{item}<div class=\"raw\">{H(f.PrizeId)}</div></td></tr>");
+        }
+        sb.Append("</table></div></section>");
         return sb.ToString();
     }
 
