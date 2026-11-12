@@ -115,13 +115,29 @@ To see it over the game, set Fortnite to **Windowed Fullscreen** (*Settings → 
 
 The game only sends prize ids, not names: the names of the known prizes are built into the tool.
 
+### Finds in your lobbies (this fork)
+
+The report also lists **every treasure found by anyone** the replay recorded: you, your team and enemies (golden chest prize ids, plus Pirate Shop / Delilah shop items if they ever show up in a replay). Tiles, a table by prize and a chronological list show who found what and when. Your own counts are not affected. Only players near you are in the replay, so the real numbers of the lobby are higher.
+
+- Every prize id is kept raw. An id without a name is written once to `unknown_prizes.log` (match date, time in match, finder, replay file).
+- Name ids yourself in `prize_names.json` (case-insensitive, overrides the built-in names; picked up without a restart). `"rare": true` highlights an entry in the report:
+
+```json
+{
+  "DelilahPrize:dpid_item15": { "name": "Pirate Shop Token", "rare": true },
+  "DelilahPrize:dpid_item5": "Some gold skin"
+}
+```
+
+Replays still in the Demos folder are re-analyzed once after updating to this version (history of older matches is kept).
+
 ## Profiles (several accounts on one PC)
 
 The replays saved on a PC are normally its player's: **no name to type**, the tool counts the player who recorded each replay. If it finds replays from several accounts, each account gets its own profile with its own statistics. The tool then asks at each launch which account you play on, and you can switch at any time with **Switch profile** on the home tab. A match played on another account is saved in that account's profile, never lost.
 
 ## Updates
 
-At startup, the counter checks GitHub for a new version. If there is one, the home tab shows **what's new in your language**, with **Install version…**: it is downloaded, verified, and the counter restarts. Your history and settings are kept. After the update, the home tab shows once what has changed. **Check for updates** asks GitHub again at any time. In the settings you can choose *offered* (default), *installed automatically* (only between two matches) or *off* (no network access at all).
+At startup, the counter checks GitHub for a new version. If there is one, the home tab shows **what's new in your language**, with **Install version…**: it is downloaded, verified, and the counter restarts. Your history and settings are kept. After the update, the home tab shows once what has changed. **Check for updates** asks GitHub again at any time. In the settings you can choose *offered*, *installed automatically* (only between two matches) or *off* (no network access at all). In this fork updates are *off* by default and only ever come from `exb9/Fortnite-ChestCounter`.
 
 ## Your data
 
@@ -135,6 +151,8 @@ Everything is stored in `%APPDATA%\ChestCounter` (**Help → Open the data folde
 | `data.json` | Your whole history. **Back it up** if you change PC. |
 | `config.json` | Your settings, your profile, the overlay position. |
 | `errors.log` | Details of unreadable replays, to attach to a bug report. |
+| `prize_names.json` | Optional, your own names (and "rare" flag) for prize ids. |
+| `unknown_prizes.log` | Prize ids seen in your replays that have no name yet. |
 
 To start over: **Settings → Start the setup again** (your history is kept), or delete this folder. If you used the old version (ChestTracker), your `%APPDATA%\ChestTracker` folder is taken over automatically.
 
