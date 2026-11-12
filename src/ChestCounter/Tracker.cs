@@ -262,6 +262,7 @@ public sealed class Tracker
         _data.Matches.Add(record);
         _data.ProcessedFiles[key] = record.SessionId;
         _store.SaveData(_data);
+        LogUnknownPrizes(record);
         if (_liveFile == file.FullName)
         {
             ClearLive(); // the final analysis replaces the live estimate
@@ -275,6 +276,59 @@ public sealed class Tracker
         }
 
         return new Outcome(record, Updated: existing != null);
+    }
+
+    /// <summary>
+    /// Appends every prize id without a name (built in or prize_names.json) to unknown_prizes.log, once per id, with the
+    /// match it was first seen in: the raw ids can then be named by hand. Tab separated, id first.
+    /// </summary>
+    private void LogUnknownPrizes(MatchRecord record)
+    {
+        try
+        {
+            TreasureNames.RefreshCustom();
+            var unknown = record.LobbyTreasureFinds
+                .Where(f => f.PrizeId.Length > 0 && !f.PrizeId.StartsWith(TreasureNames.UnknownPrefix, StringComparison.OrdinalIgnoreCase) && !TreasureNames.IsKnown(f.PrizeId))
+                .GroupBy(f => f.PrizeId, StringComparer.OrdinalIgnoreCase)
+                .Select(g => g.First())
+                .ToList();
+            if (unknown.Count == 0)
+            {
+                return;
+            }
+
+            var path = _store.UnknownPrizesPath;
+            var logged = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (File.Exists(path))
+            {
+                foreach (var line in File.ReadLines(path))
+                {
+                    if (line.Length > 0 && line[0] != '#')
+                    {
+                        logged.Add(line.Split('\t')[0].Trim());
+                    }
+                }
+            }
+            var matchStart = (record.MatchStartUtc ?? record.AnalyzedAtUtc).ToLocalTime();
+            var sb = new StringBuilder();
+            if (!File.Exists(path))
+            {
+                sb.AppendLine("# prize id\tmatch (local time)\ttime in match\tfound by\treplay file   -- name them in prize_names.json");
+            }
+            foreach (var f in unknown.Where(f => !logged.Contains(f.PrizeId)))
+            {
+                var who = f.Role + (f.PlayerName.Length > 0 ? $" ({f.PlayerName})" : "");
+                sb.AppendLine($"{f.PrizeId}\t{matchStart:yyyy-MM-dd HH:mm}\t{Pretty.Clock(f.TimeSeconds)}\t{who}\t{record.ReplayFile}");
+            }
+            if (sb.Length > 0)
+            {
+                File.AppendAllText(path, sb.ToString(), new UTF8Encoding(false));
+            }
+        }
+        catch (Exception ex)
+        {
+            ErrorLog.Write("Cannot write unknown_prizes.log", ex); // never stop the analysis for it
+        }
     }
 
     private void PrintOutcome(Outcome o)

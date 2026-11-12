@@ -116,7 +116,11 @@ public sealed class ReplayAnalyzer : FortniteReplayReader.ReplayReader
     private readonly List<GrantEvent> _grants = new();
 
     /// <summary>Bump when the analysis changes so that existing replays are re-analyzed.</summary>
-    public const int CurrentVersion = 15;
+    /// <remarks>16: lobby-wide treasure finds (<see cref="MatchRecord.LobbyTreasureFinds"/>).</remarks>
+    public const int CurrentVersion = 16;
+
+    // Pirate Shop / Delilah shop items (Pirate Shop Token): never seen in a replay so far, watched as a second source.
+    private static readonly Regex ShopItem = new(@"PirateShop|DelilahShop", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     private static readonly bool ProbeDebug = Environment.GetEnvironmentVariable("CHESTCOUNTER_DEBUG") == "4";
 
@@ -343,6 +347,10 @@ public sealed class ReplayAnalyzer : FortniteReplayReader.ReplayReader
         if (Environment.GetEnvironmentVariable("CHESTCOUNTER_DEBUG") == "3")
         {
             Console.Error.WriteLine($"EXP {Now,7:F1}s {pathName}");
+        }
+        if (Debug == "1" && ShopItem.IsMatch(pathName))
+        {
+            Console.Error.WriteLine($"DBG shopexport {Now,7:F1}s guid={netGuid} {pathName}");
         }
         if (TrackedExport.IsMatch(pathName))
         {
@@ -840,6 +848,79 @@ public sealed class ReplayAnalyzer : FortniteReplayReader.ReplayReader
             var goldenEnemy = _prizes.Count(x => x.Pawn is uint w && !targetPawns.Contains(w) && !teammatePawns.ContainsKey(w));
             Console.Error.WriteLine($"DBG searches enemy={enemy} mates={mates} duration={replay.Info?.LengthInMs / 1000} goldenEnemy={goldenEnemy} team={teammatePawns.Count}");
         }
+        // --- Every treasure in the lobby (anyone the recording player saw) ---------------------------
+        // Additional view only: TreasureFinds / TeamTreasureFinds above are left exactly as they were.
+        PlayerData? PlayerOfPawn(uint pawn) =>
+            _pawnToPlayerState.TryGetValue(pawn, out var ps) && _playerStateToPlayerId.TryGetValue(ps, out var pid)
+                ? players.FirstOrDefault(p => p.Id == pid) : null;
+        (string Role, string Name) Finder(uint? pawn)
+        {
+            if (pawn is not uint p)
+            {
+                return (LobbyRole.Unknown, "");
+            }
+            if (targetPawns.Contains(p))
+            {
+                return (LobbyRole.Self, target?.PlayerName ?? PlayerOfPawn(p)?.PlayerName ?? "");
+            }
+            if (teammatePawns.TryGetValue(p, out var mate))
+            {
+                return (LobbyRole.Team, mate);
+            }
+            var who = PlayerOfPawn(p);
+            if (who == null)
+            {
+                return (LobbyRole.Unknown, "");
+            }
+            // Enemy only when both teams are known and differ; anything else stays unknown rather than guessed.
+            var role = target?.TeamIndex is int myTeam && who.TeamIndex is int theirTeam
+                ? (theirTeam == myTeam ? LobbyRole.Team : LobbyRole.Enemy)
+                : LobbyRole.Unknown;
+            return (role, who.PlayerName ?? "");
+        }
+
+        var lobby = new List<LobbyFind>();
+        foreach (var pz in _prizes)
+        {
+            var (role, name) = Finder(pz.Pawn);
+            var label = CleanName(pz.Container);
+            if (Debug == "1")
+            {
+                Console.Error.WriteLine($"DBG lobbyprize {pz.Time,7:F1}s id={pz.PrizeId} pawn={(pz.Pawn?.ToString() ?? "-")} player={(name.Length > 0 ? name : "?")} role={role} chest={label}");
+            }
+            lobby.Add(new LobbyFind
+            {
+                TimeSeconds = MathF.Round(pz.Time, 1),
+                PrizeId = pz.PrizeId,
+                DisplayName = TreasureNames.Friendly(pz.PrizeId),
+                PlayerName = name,
+                Role = role,
+                SourceKind = string.IsNullOrEmpty(label) ? "inconnu" : ChestKinds.Classify(label),
+                SourceBlueprint = label,
+                Detection = "golden-chest",
+            });
+        }
+
+        // Second source: shop items (Pirate Shop Token...) seen in someone's hands or thrown out of a container.
+        foreach (var e in _equips.Where(e => ShopItem.IsMatch(e.Item)).GroupBy(e => (e.Pawn, e.Item)).Select(g => g.First()))
+        {
+            var (role, name) = Finder(e.Pawn);
+            if (Debug == "1")
+            {
+                Console.Error.WriteLine($"DBG lobbyitem {e.Time,7:F1}s id={e.Item} pawn={e.Pawn} player={(name.Length > 0 ? name : "?")} role={role} (equipped)");
+            }
+            lobby.Add(new LobbyFind { TimeSeconds = MathF.Round(e.Time, 1), PrizeId = e.Item, DisplayName = TreasureNames.Friendly(e.Item), PlayerName = name, Role = role, SourceKind = "inconnu", Detection = "item" });
+        }
+        foreach (var t in _tosses.Where(t => ShopItem.IsMatch(t.Item)))
+        {
+            if (Debug == "1")
+            {
+                Console.Error.WriteLine($"DBG lobbyitem {t.Time,7:F1}s id={t.Item} pawn=- player=? role={LobbyRole.Unknown} (tossed from container)");
+            }
+            lobby.Add(new LobbyFind { TimeSeconds = MathF.Round(t.Time, 1), PrizeId = t.Item, DisplayName = TreasureNames.Friendly(t.Item), Role = LobbyRole.Unknown, SourceKind = "inconnu", Detection = "item" });
+        }
+        lobby.Sort((a, b) => a.TimeSeconds.CompareTo(b.TimeSeconds));
+
         teamFinds.Sort((a, b) => (a.ObtainedAtSeconds ?? float.MaxValue).CompareTo(b.ObtainedAtSeconds ?? float.MaxValue));
         finds.Sort((a, b) => (a.ObtainedAtSeconds ?? float.MaxValue).CompareTo(b.ObtainedAtSeconds ?? float.MaxValue));
 
@@ -874,6 +955,7 @@ public sealed class ReplayAnalyzer : FortniteReplayReader.ReplayReader
             Chests = chests,
             TreasureFinds = finds,
             TeamTreasureFinds = teamFinds,
+            LobbyTreasureFinds = lobby,
         };
     }
 }
@@ -887,8 +969,107 @@ public static class TreasureNames
     public const string UnknownGizmoFr = "Gizmo de trésor", UnknownGizmoEn = "Treasure gizmo", UnknownGizmoEs = "Artilugio de tesoro";
     private const string OldUnknownPrefix = "Inconnu:";
 
+    /// <summary>One entry of prize_names.json.</summary>
+    public sealed record CustomPrize(string Name, bool Rare);
+
+    private static readonly object CustomLock = new();
+    private static Dictionary<string, CustomPrize> _custom = new(StringComparer.OrdinalIgnoreCase);
+    private static DateTime _customStamp = DateTime.MinValue;
+
+    /// <summary>Path of prize_names.json (set at startup); null = no custom names.</summary>
+    public static string? CustomPath { get; set; }
+
+    /// <summary>
+    /// (Re)loads prize_names.json when it changed: <c>{ "id": "Name" }</c> or <c>{ "id": { "name": "Name", "rare": true } }</c>,
+    /// ids compared case-insensitively. Entries override the built-in names. A broken file keeps the previous names
+    /// and is reported in errors.log. Cheap when nothing changed (one file time check).
+    /// </summary>
+    public static void RefreshCustom()
+    {
+        var path = CustomPath;
+        try
+        {
+            if (path == null || !File.Exists(path))
+            {
+                lock (CustomLock)
+                {
+                    _custom = new(StringComparer.OrdinalIgnoreCase);
+                    _customStamp = DateTime.MinValue;
+                }
+                return;
+            }
+            var stamp = File.GetLastWriteTimeUtc(path);
+            if (stamp == _customStamp)
+            {
+                return;
+            }
+            var parsed = new Dictionary<string, CustomPrize>(StringComparer.OrdinalIgnoreCase);
+            using (var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(path), new System.Text.Json.JsonDocumentOptions { CommentHandling = System.Text.Json.JsonCommentHandling.Skip, AllowTrailingCommas = true }))
+            {
+                foreach (var p in doc.RootElement.EnumerateObject())
+                {
+                    var id = p.Name.Trim();
+                    if (id.Length == 0)
+                    {
+                        continue;
+                    }
+                    switch (p.Value.ValueKind)
+                    {
+                        case System.Text.Json.JsonValueKind.String:
+                            parsed[id] = new CustomPrize(p.Value.GetString() ?? "", false);
+                            break;
+                        case System.Text.Json.JsonValueKind.Object:
+                            string? name = null;
+                            var rare = false;
+                            foreach (var f in p.Value.EnumerateObject())
+                            {
+                                if (f.NameEquals("name") || f.Name.Equals("name", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    name = f.Value.ValueKind == System.Text.Json.JsonValueKind.String ? f.Value.GetString() : null;
+                                }
+                                else if (f.Name.Equals("rare", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    rare = f.Value.ValueKind == System.Text.Json.JsonValueKind.True;
+                                }
+                            }
+                            parsed[id] = new CustomPrize(name ?? "", rare);
+                            break;
+                    }
+                }
+            }
+            lock (CustomLock)
+            {
+                _custom = parsed;
+                _customStamp = stamp;
+            }
+        }
+        catch (Exception ex)
+        {
+            // Keep the previous names; do not retry until the file changes again.
+            try { _customStamp = File.GetLastWriteTimeUtc(path!); } catch { }
+            ErrorLog.Write($"Unreadable prize names file: {path}", ex);
+        }
+    }
+
+    private static CustomPrize? Custom(string id)
+    {
+        lock (CustomLock)
+        {
+            return _custom.TryGetValue(id.Trim(), out var c) ? c : null;
+        }
+    }
+
+    /// <summary>True when prize_names.json marks this id as rare (Pirate Shop token, gold skins...).</summary>
+    public static bool IsRare(string id) => Custom(id)?.Rare == true;
+
+    /// <summary>True when the id has a name (built in or in prize_names.json).</summary>
+    public static bool IsKnown(string id) => Custom(id) is { Name.Length: > 0 } || BuiltInPrize(id) != null;
+
+    /// <summary>Prize ids whose reward is known: prize_names.json first, then the built-in list.</summary>
+    private static string? KnownPrize(string id) => Custom(id) is { Name.Length: > 0 } c ? c.Name : BuiltInPrize(id);
+
     /// <summary>Prize ids whose reward is known, in the chosen language (built in: nothing to fill in by hand).</summary>
-    private static string? KnownPrize(string id) => id.ToLowerInvariant() switch
+    private static string? BuiltInPrize(string id) => id.ToLowerInvariant() switch
     {
         "delilahprize:dpid_item1" => L.T("Gantelets d'A$AP Rocky en or massif (pioche) ?", "A$AP Rocky solid gold gauntlets (pickaxe) ?", "Guanteletes de oro macizo de A$AP Rocky (pico) ?"),
         "delilahprize:dpid_item2" => L.T("Plunder in Paradise (écran de chargement)", "Plunder in Paradise (loading screen)", "Plunder in Paradise (pantalla de carga)"),
@@ -916,6 +1097,10 @@ public static class TreasureNames
             return L.T("Récompense de coffre doré", "Golden chest reward", "Recompensa de cofre dorado");
         }
 
+        if (Custom(item) is { Name.Length: > 0 } custom)
+        {
+            return custom.Name;
+        }
         var i = item.ToLowerInvariant();
         if (i.Contains("flameceleb")) return "Feu d'artifice doré";
         if (i.Contains("relicextractor")) return "Extracteur portable";

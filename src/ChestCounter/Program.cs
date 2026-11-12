@@ -95,6 +95,8 @@ for (var i = 0; i < args.Length; i++)
 dataDir ??= Store.DefaultFolder();
 var store = new Store(dataDir);
 ErrorLog.FilePath = store.ErrorLogPath;
+TreasureNames.CustomPath = store.PrizeNamesPath;
+TreasureNames.RefreshCustom();
 var interactive = ConsoleUi.Interactive;
 if (interactive && !once && previewPath == null)
 {

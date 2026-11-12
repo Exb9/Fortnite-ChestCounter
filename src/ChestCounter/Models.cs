@@ -75,6 +75,42 @@ public sealed class MatchRecord
     public List<TreasureFind> TreasureFinds { get; set; } = new();
     /// <summary>Treasures found by teammates (shared with the whole team). Not counted in the player's own totals.</summary>
     public List<TreasureFind> TeamTreasureFinds { get; set; } = new();
+    /// <summary>
+    /// Every treasure seen in the replay, whoever found it (the player, a teammate or an enemy). Overlaps with
+    /// <see cref="TreasureFinds"/> / <see cref="TeamTreasureFinds"/> on purpose; never used for the player's own counts.
+    /// Empty for matches analyzed before analyzer version 16.
+    /// </summary>
+    public List<LobbyFind> LobbyTreasureFinds { get; set; } = new();
+}
+
+/// <summary>Who found a lobby treasure, relative to the tracked player.</summary>
+public static class LobbyRole
+{
+    public const string Self = "Self";
+    public const string Team = "Team";
+    public const string Enemy = "Enemy";
+    /// <summary>The finder's pawn could not be resolved to a player (could be anyone, a teammate included).</summary>
+    public const string Unknown = "Unknown";
+}
+
+/// <summary>One treasure found by anyone in the match (see <see cref="MatchRecord.LobbyTreasureFinds"/>).</summary>
+public sealed class LobbyFind
+{
+    /// <summary>Replay seconds.</summary>
+    public float TimeSeconds { get; set; }
+    /// <summary>Raw id as found in the replay ("DelilahPrize:dpid_item4", or an item blueprint name). Never rewritten.</summary>
+    public string PrizeId { get; set; } = "";
+    /// <summary>Display name at analysis time (the report re-resolves it from <see cref="PrizeId"/>).</summary>
+    public string DisplayName { get; set; } = "";
+    /// <summary>Epic display name of the finder, "" when it could not be resolved.</summary>
+    public string PlayerName { get; set; } = "";
+    /// <summary><see cref="LobbyRole"/> value.</summary>
+    public string Role { get; set; } = LobbyRole.Unknown;
+    /// <summary>Kind of the source container (chest kind), or "inconnu".</summary>
+    public string SourceKind { get; set; } = "";
+    public string SourceBlueprint { get; set; } = "";
+    /// <summary>"golden-chest" (prize id carried by the golden treasure chest) or "item" (treasure item seen in hand).</summary>
+    public string Detection { get; set; } = "golden-chest";
 }
 
 public sealed class Config
@@ -174,6 +210,10 @@ public sealed class Store
     public string OverlayPath => Path.Combine(Folder, "overlay.html");
     public string CsvPath => Path.Combine(Folder, "matches.csv");
     public string ErrorLogPath => Path.Combine(Folder, "errors.log");
+    /// <summary>Optional, hand-written: prize id -> display name (and "rare" flag). See <see cref="TreasureNames.LoadCustom"/>.</summary>
+    public string PrizeNamesPath => Path.Combine(Folder, "prize_names.json");
+    /// <summary>Every prize id not known yet, logged once with the match it was first seen in.</summary>
+    public string UnknownPrizesPath => Path.Combine(Folder, "unknown_prizes.log");
 
     public Store(string folder)
     {
